@@ -1,16 +1,18 @@
 import telebot
-import sys
 import json
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from taskmaneger import Taskmanedger
+
 
 token = '8290284835:AAFKcQDUKnmnFT7aATRXOWt52J-PyQ0iCXw'
 bot = telebot.TeleBot(token)
 taskmaneger = Taskmanedger()
 
+
 # Флаги состояния — отслеживают, ждёт ли бот ввода названия или описания задачи
 waiting_for_task_name = False
 waiting_for_task_desc = False
+
 
 # --- Функции для работы с JSON ---
 def save_tasks():
@@ -20,6 +22,7 @@ def save_tasks():
             json.dump(taskmaneger.tasks, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[ERROR] Не удалось сохранить задачи в файл: {e}")
+
 
 def load_tasks():
     """Загружает задачи из файла tasks.json при запуске"""
@@ -42,10 +45,9 @@ def get_main_menu():
         one_time_keyboard=False,
         selective=False
     )
-    markup.add(KeyboardButton("📝 Создать задачу"))
-    markup.add(KeyboardButton("📋 Показать задачи"))
-    markup.add(KeyboardButton("🗑️ Удалить задачу"))
-    markup.add(KeyboardButton("🔴 Stop"))
+    markup.add(KeyboardButton("Создать задачу"))
+    markup.add(KeyboardButton("Показать задачи"))
+    markup.add(KeyboardButton("Удалить задачу"))
     return markup
 
 # --- Обработчики команд ---
@@ -60,19 +62,11 @@ def start_message(message):
     except Exception as e:
         print(f"[ERROR] Не удалось отправить меню: {e}")
 
-@bot.message_handler(commands=['stop'])
-def stop_bot(message):
-    bot.send_message(
-        message.chat.id,
-        "Бот остановлен. До свидания! 👋",
-        reply_markup=ReplyKeyboardRemove()  # Убираем клавиатуру
-    )
-    print("Бот остановлен по команде /stop")
-    sys.exit(0)  # Корректное завершение программы
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
     global waiting_for_task_name, waiting_for_task_desc
+
 
     # Если бот ждёт ввода названия или описания — пропускаем общий обработчик
     if waiting_for_task_name or waiting_for_task_desc:
@@ -85,8 +79,6 @@ def handle_text(message):
             show_tasks(message)
         elif message.text == "Удалить задачу":
             delete_task(message)
-        elif message.text == "Stop":  # Обработка кнопки «Stop»
-            stop_bot(message)
         else:
             bot.send_message(
                 chat_id=message.chat.id,
@@ -95,6 +87,7 @@ def handle_text(message):
             )
     except Exception as e:
         print(f"[ERROR] Ошибка в handle_text: {e}")
+
 
 @bot.message_handler(commands=["create"])
 def create_task(message):
@@ -110,9 +103,11 @@ def create_task(message):
     except Exception as e:
         print(f"[ERROR] Ошибка в create_task: {e}")
 
+
 def process_task_name(message):
     global waiting_for_task_name, waiting_for_task_desc
     waiting_for_task_name = False  # Сбрасываем флаг
+
 
     if not message.text:
         bot.send_message(
@@ -131,9 +126,11 @@ def process_task_name(message):
     )
     bot.register_next_step_handler(msg, process_task_desc, task_name)
 
+
 def process_task_desc(message, task_name):
     global waiting_for_task_desc
     waiting_for_task_desc = False  # Сбрасываем флаг
+
 
     if not message.text:
         bot.send_message(
@@ -146,7 +143,7 @@ def process_task_desc(message, task_name):
     task_desc = message.text
     # Сохраняем задачу и сразу записываем в файл
     taskmaneger.createTask(task_name, task_desc)
-    save_tasks()  # СОХРАНЕНИЕ В ФАЙЛ
+    save_tasks()  # <--- СОХРАНЕНИЕ В ФАЙЛ
     bot.send_message(
         message.chat.id,
         "Задача создана!",
@@ -170,6 +167,7 @@ def show_tasks(message):
         )
     except Exception as e:
         print(f"[ERROR] Ошибка в show_tasks: {e}")
+
 
 @bot.message_handler(commands=["delete"])
 def delete_task(message):
@@ -202,7 +200,7 @@ def process_delete(message):
             )
             return
         taskmaneger.tasks.pop(num)
-        save_tasks()  # СОХРАНЕНИЕ В ФАЙЛ ПОСЛЕ УДАЛЕНИЯ
+        save_tasks()  # <--- СОХРАНЕНИЕ В ФАЙЛ ПОСЛЕ УДАЛЕНИЯ
         bot.send_message(
             message.chat.id,
             "Задача удалена!",
@@ -214,6 +212,7 @@ def process_delete(message):
             "Пожалуйста, введите число.",
             reply_markup=get_main_menu()
         )
+
 # --- Запуск бота ---
 if __name__ == '__main__':
     # Загружаем задачи из файла при старте
