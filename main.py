@@ -1,162 +1,91 @@
 import telebot
 import sys
 import json
+import logging
+import os
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from taskmaneger import Taskmanedger
 
+#Обновление записи версии бота
+version = "0.0.1"
+
+# Хранение задач по пользователям
+USER_TASKS = {}  # {user_id: [{'name': ..., 'description': ...}, ...]}
+TASKS_DIR = 'tasks'
+if not os.path.exists(TASKS_DIR):
+    os.makedirs(TASKS_DIR)
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Проверка токена
 token = '8290284835:AAFKcQDUKnmnFT7aATRXOWt52J-PyQ0iCXw'
+if not token or len(token) < 10:
+    logger.error("Некорректный токен бота!")
+    sys.exit(1)
+
 bot = telebot.TeleBot(token)
-taskmaneger = Taskmanedger()
 
-# Флаги состояния — отслеживают, ждёт ли бот ввода названия или описания задачи
-waiting_for_task_name = False
-waiting_for_task_desc = False
+# Контекст пользователей
+user_states = {}  # {user_id: {'state': 'waiting_name', 'task_name': ''}}
 
-# --- Функции для работы с JSON ---
-def save_tasks():
-    """Сохраняет задачи в файл tasks.json"""
-    try:
-        with open('tasks.json', 'w', encoding='utf-8') as f:
-            json.dump(taskmaneger.tasks, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"[ERROR] Не удалось сохранить задачи в файл: {e}")
+def get_user_state(user_id):
+    return user_states.get(user_id, {})
 
-def load_tasks():
-    """Загружает задачи из файла tasks.json при запуске"""
-    try:
-        with open('tasks.json', 'r', encoding='utf-8') as f:
-            taskmaneger.tasks = json.load(f)
-        print("[INFO] Задачи загружены из файла tasks.json")
-    except FileNotFoundError:
-        print("[INFO] Файл tasks.json не найден. Начнём с пустого списка задач.")
-        taskmaneger.tasks = []
-    except json.JSONDecodeError as e:
-        print(f"[ERROR] Ошибка чтения JSON-файла: {e}")
-        taskmaneger.tasks = []
+def set_user_state(user_id, state):
+    user_states[user_id] = state
 
-# --- Создание клавиатуры ---
-def get_main_menu():
-    """Создаёт и возвращает клавиатуру с кнопками."""
-    markup = ReplyKeyboardMarkup(
-        resize_keyboard=True,
-        one_time_keyboard=False,
-        selective=False
-    )
-    markup.add(KeyboardButton("📝 Создать задачу"))
-    markup.add(KeyboardButton("📋 Показать задачи"))
-    markup.add(KeyboardButton("🗑️ Удалить задачу"))
-    markup.add(KeyboardButton("🔴 Stop"))
+# --- Создание клавиатуры с кнопками удаления ---
+def get_tasks_keyboard(tasks):
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    for i, task in enumerate(tasks, 1):
+        markup.add(f"🗑️ Удалить №{i}: {task['name'][:25]}...")
+    markup.add("⬅️ Назад")
     return markup
 
-# --- Обработчики команд ---
+# --- Пагинация задач ---
+TASKS_PER_PAGE = 5
+
+def format_tasks_page(tasks, page):
+    start = (page - 1) * TASKS_PER_PAGE
+    end = start + TASKS_PER_PAGE
+    paginated = tasks[start:end]
+
+    if not paginated:
+        return "Нет задач на этой странице."
+
+    response = f"Задачи (страница {page}):\n\n"
+    for i, task in enumerate(paginated, start + 1):
+        response += f"{i}. <b>{task['name']}</b>\n   {task['description']}\n\n"
+    return response
+
+# --- Команды ---
 @bot.message_handler(commands=['start'])
 def start_message(message):
     try:
         bot.send_message(
             chat_id=message.chat.id,
-            text="ХАЙ ✌️ Выберите действие:",
+            text="Привет✌️ Выберите действие:",
             reply_markup=get_main_menu()
         )
     except Exception as e:
-        print(f"[ERROR] Не удалось отправить меню: {e}")
+        logger.error(f"[ERROR] Не удалось отправить меню: {e}")
 
-@bot.message_handler(commands=['stop'])
-def stop_bot(message):
-    bot.send_message(
-        message.chat.id,
-        "Бот остановлен. До свидания! 👋",
-        reply_markup=ReplyKeyboardRemove()  # Убираем клавиатуру
-    )
-    print("Бот остановлен по команде /stop")
-    sys.exit(0)  # Корректное завершение программы
-
-@bot.message_handler(func=lambda message: True)
-def handle_text(message):
-    global waiting_for_task_name, waiting_for_task_desc
-
-    # Если бот ждёт ввода названия или описания — пропускаем общий обработчик
-    if waiting_for_task_name or waiting_for_task_desc:
-        return
-
-    try:
-        if message.text == "Создать задачу":
-            create_task(message)
-        elif message.text == "Показать задачи":
-            show_tasks(message)
-        elif message.text == "Удалить задачу":
-            delete_task(message)
-        elif message.text == "Stop":  # Обработка кнопки «Stop»
-            stop_bot(message)
-        else:
-            bot.send_message(
-                chat_id=message.chat.id,
-                text="Неизвестная команда. Используйте кнопки ниже.",
-                reply_markup=get_main_menu()
-            )
-    except Exception as e:
-        print(f"[ERROR] Ошибка в handle_text: {e}")
-
-@bot.message_handler(commands=["create"])
-def create_task(message):
-    try:
-        global waiting_for_task_name
-        waiting_for_task_name = True
-        msg = bot.send_message(
-            message.chat.id,
-            "Введите название задачи:",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        bot.register_next_step_handler(msg, process_task_name)
-    except Exception as e:
-        print(f"[ERROR] Ошибка в create_task: {e}")
-
-def process_task_name(message):
-    global waiting_for_task_name, waiting_for_task_desc
-    waiting_for_task_name = False  # Сбрасываем флаг
-
-    if not message.text:
-        bot.send_message(
-            message.chat.id,
-            "Название задачи не может быть пустым!",
-            reply_markup=get_main_menu()
-        )
-        return
-
-    task_name = message.text
-    waiting_for_task_desc = True  # Устанавливаем флаг ожидания описания
-    msg = bot.send_message(
-        message.chat.id,
-        "Введите описание задачи:",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    bot.register_next_step_handler(msg, process_task_desc, task_name)
-
-def process_task_desc(message, task_name):
-    global waiting_for_task_desc
-    waiting_for_task_desc = False  # Сбрасываем флаг
-
-    if not message.text:
-        bot.send_message(
-            message.chat.id,
-            "Описание задачи не может быть пустым!",
-            reply_markup=get_main_menu()
-        )
-        return
-
-    task_desc = message.text
-    # Сохраняем задачу и сразу записываем в файл
-    taskmaneger.createTask(task_name, task_desc)
-    save_tasks()  # СОХРАНЕНИЕ В ФАЙЛ
-    bot.send_message(
-        message.chat.id,
-        "Задача создана!",
-        reply_markup=get_main_menu()
-    )
-
-@bot.message_handler(commands=["show"])
+@bot.message_handler(commands=['show'])
 def show_tasks(message):
+    user_id = message.from_user.id
+    if user_id not in USER_TASKS:
+        load_user_tasks(user_id)
+
     try:
-        tasks = taskmaneger.get_tasks()
+        tasks = USER_TASKS[user_id]
         if tasks:
             response = "Ваши задачи:\n\n"
             for i, task in enumerate(tasks, 1):
@@ -166,43 +95,118 @@ def show_tasks(message):
         bot.send_message(
             message.chat.id,
             response,
-            reply_markup=get_main_menu()
+            reply_markup=get_main_menu(),
+            parse_mode='HTML'
         )
     except Exception as e:
-        print(f"[ERROR] Ошибка в show_tasks: {e}")
+        logger.error(f"Ошибка в show_tasks: {e}")
 
-@bot.message_handler(commands=["delete"])
-def delete_task(message):
+@bot.message_handler(commands=['next'])
+def show_next_page(message):
     try:
-        tasks = taskmaneger.get_tasks()
+        user_id = message.from_user.id
+        if user_id not in USER_TASKS:
+            load_user_tasks(user_id)
+        tasks = USER_TASKS[user_id]
+
         if not tasks:
-            bot.send_message(
-                message.chat.id,
-                "Список задач пуст.",
-                reply_markup=get_main_menu()
-            )
+            bot.send_message(message.chat.id, "Список задач пуст.")
             return
+
+        state = get_user_state(user_id)
+        current_page = state.get('show_page', 1)
+        next_page = current_page + 1
+
+        if next_page > (len(tasks) + TASKS_PER_PAGE - 1) // TASKS_PER_PAGE:
+            bot.send_message(message.chat.id, "Это последняя страница.")
+            return
+
+        response = format_tasks_page(tasks, next_page)
+        if len(tasks) > next_page * TASKS_PER_PAGE:
+            response += "\n🔽 Используйте /next для следующей страницы"
+
         bot.send_message(
             message.chat.id,
-            "Введите номер задачи для удаления:",
-            reply_markup=ReplyKeyboardRemove()
+            response,
+            reply_markup=get_main_menu(),
+            parse_mode='HTML'
         )
-        bot.register_next_step_handler(message, process_delete)
+        set_user_state(user_id, {'show_page': next_page})
     except Exception as e:
-        print(f"[ERROR] Ошибка в delete_task: {e}")
+        logger.error(f"Ошибка в show_next_page: {e}")
 
-def process_delete(message):
+@bot.message_handler(func=lambda message: message.text == "🔹 О боте")
+def info_about(message):
+    bot.send_message(
+        chat_id=message.chat.id,
+        text="Этот бот помогает управлять вашими задачами. "
+              "Вы можете создавать, просматривать и удалять задачи.",
+        reply_markup=get_info_menu()  # Остаёмся в подменю
+    )
+
+@bot.message_handler(func=lambda message: message.text == "🔹 Автор")
+def info_author(message):
+    bot.send_message(
+        chat_id=message.chat.id,
+        text="Разработчик: Илья Маклаков\n"
+              "Контакты: @boy_161",
+        reply_markup=get_info_menu()
+    )
+
+@bot.message_handler(func=lambda message: message.text == "🔹 Версия")
+def info_version(message):
+    bot.send_message(
+        chat_id=message.chat.id,
+        text="Версия бота: 0.0.1\n"
+              "Дата релиза: 03.12.2025",
+        reply_markup=get_info_menu()
+    )
+
+@bot.message_handler(commands=['help'])
+@bot.message_handler(func=lambda message: message.text == "❓ Помощь")
+def help_command(message):
+    bot.send_message(
+        message.chat.id,
+        "🛠 *Команды бота:*\n"
+        "/start — запустить\n"
+        "/show — показать задачи\n"
+        "/create — создать задачу\n"
+        "/delete — удалить задачу\n"
+        "/next — следующая страница\n"
+        "/help — эта справка\n\n"
+        "🔘 *Кнопки меню:*\n"
+        "👀 Информация — о боте и авторе\n"
+        "📅 Создать задачу — ввод новой задачи\n"
+        "📋 Показать задачи — просмотр списка\n"
+        "🗑️ Удалить задачу — выбор для удаления\n"
+        "❓ Помощь — эта страница\n"
+        "⬅️ Назад — возврат в главное меню",
+        reply_markup=get_main_menu(),
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(func=lambda m: m.text and m.text.startswith("🗑️ Удалить №"))
+def delete_task_by_button(message):
     try:
-        num = int(message.text) - 1
-        if num < 0 or num >= len(taskmaneger.tasks):
+        text = message.text
+        num_str = text.split("№")[1].split(":")[0]
+        num = int(num_str) - 1  # перевод в индекс списка
+
+        user_id = message.from_user.id
+        if user_id not in USER_TASKS:
+            load_user_tasks(user_id)
+        tasks = USER_TASKS[user_id]
+
+        if num < 0 or num >= len(tasks):
             bot.send_message(
                 message.chat.id,
                 "Неверный номер задачи.",
                 reply_markup=get_main_menu()
             )
             return
-        taskmaneger.tasks.pop(num)
-        save_tasks()  # СОХРАНЕНИЕ В ФАЙЛ ПОСЛЕ УДАЛЕНИЯ
+
+        tasks.pop(num)
+        save_user_tasks(user_id)
         bot.send_message(
             message.chat.id,
             "Задача удалена!",
@@ -211,12 +215,190 @@ def process_delete(message):
     except ValueError:
         bot.send_message(
             message.chat.id,
-            "Пожалуйста, введите число.",
+            "Не удалось определить номер задачи.",
             reply_markup=get_main_menu()
         )
+    except Exception as e:
+        logger.error(f"Ошибка при удалении задачи: {e}")
+
+
+@bot.message_handler(commands=["create"])
+def create_task(message):
+    user_id = message.from_user.id
+    if user_id not in USER_TASKS:
+        load_user_tasks(user_id)
+
+    try:
+        msg = bot.send_message(
+            message.chat.id,
+            "Введите название задачи:",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        bot.register_next_step_handler(msg, process_task_name, user_id)
+    except Exception as e:
+        logger.error(f"Ошибка в create_task: {e}")
+
+def process_task_name(message, user_id):
+    if not message.text:
+        bot.send_message(
+            message.chat.id,
+            "Название задачи не может быть пустым!",
+            reply_markup=get_main_menu()
+        )
+        return
+
+    task_name = message.text
+    msg = bot.send_message(
+        message.chat.id,
+        "Введите описание задачи:",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    bot.register_next_step_handler(msg, process_task_desc, user_id, task_name)
+
+def process_task_desc(message, user_id, task_name):
+    if not message.text:
+        bot.send_message(
+            message.chat.id,
+            "Описание задачи не может быть пустым!",
+            reply_markup=get_main_menu()
+        )
+        return
+
+    task_desc = message.text
+    # Добавляем задачу в персональный список пользователя
+    USER_TASKS[user_id].append({
+        'name': task_name,
+        'description': task_desc
+    })
+    save_user_tasks(user_id)  # Сохраняем только его задачи
+    bot.send_message(
+        message.chat.id,
+        "Задача создана!",
+        reply_markup=get_main_menu()
+    )
+
+
+@bot.message_handler(commands=["delete"])
+def delete_task(message):
+    user_id = message.from_user.id
+    if user_id not in USER_TASKS:
+        load_user_tasks(user_id)
+
+    try:
+        tasks = USER_TASKS[user_id]
+        if not tasks:
+            bot.send_message(
+                message.chat.id,
+                "Список задач пуст.",
+                reply_markup=get_main_menu()
+            )
+            return
+        # Показываем клавиатуру с кнопками удаления
+        bot.send_message(
+            message.chat.id,
+            "Выберите задачу для удаления:",
+            reply_markup=get_tasks_keyboard(tasks)
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в delete_task: {e}")
+
+
+# --- Вспомогательные функции ---
+def load_user_tasks(user_id):
+    """Загружает задачи конкретного пользователя из папки tasks/"""
+    filename = os.path.join(TASKS_DIR, f'tasks_{user_id}.json')
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            USER_TASKS[user_id] = json.load(f)
+        logger.info(f"Задачи пользователя {user_id} загружены из {filename}")
+    except FileNotFoundError:
+        USER_TASKS[user_id] = []
+        logger.info(f"У пользователя {user_id} нет задач (файл не найден)")
+    except json.JSONDecodeError as e:
+        logger.error(f"Ошибка чтения файла {filename}: {e}")
+        USER_TASKS[user_id] = []
+
+
+def save_user_tasks(user_id):
+    """Сохраняет задачи конкретного пользователя в папку tasks/"""
+    filename = os.path.join(TASKS_DIR, f'tasks_{user_id}.json')
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(USER_TASKS[user_id], f, ensure_ascii=False, indent=2)
+        logger.info(f"Задачи пользователя {user_id} сохранены в {filename}")
+    except Exception as e:
+        logger.error(f"Не удалось сохранить задачи пользователя {user_id}: {e}")
+
+def show_info_menu(message):
+    bot.send_message(
+        chat_id=message.chat.id,
+        text="Выберите раздел:",
+        reply_markup=get_info_menu()  # Используем подменю из get_info_menu()
+    )
+@bot.message_handler(func=lambda message: message.text == "👀 Информация")
+def handle_info_button(message):
+    show_info_menu(message)
+
+@bot.message_handler(func=lambda message: message.text == "⬅️ Назад")
+def go_back(message):
+    bot.send_message(
+        chat_id=message.chat.id,
+        text="Главное меню:",
+        reply_markup=get_main_menu()
+    )
+
+def get_info_menu():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(KeyboardButton("🔹 О боте"))
+    markup.add(KeyboardButton("🔹 Автор"))
+    markup.add(KeyboardButton("🔹 Версия"))
+    markup.add(KeyboardButton("⬅️ Назад"))
+    return markup
+
+def get_main_menu():
+    """Создаёт и возвращает клавиатуру с кнопками."""
+    markup = ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        selective=False
+    )
+    markup.add(KeyboardButton('👀 Информация'))
+    markup.add(KeyboardButton('📅 Создать задачу'))
+    markup.add(KeyboardButton('📋 Показать задачи'))
+    markup.add(KeyboardButton('🗑️ Удалить задачу'))
+    markup.add(KeyboardButton('❓ Помощь'))
+    return markup
+# ОБРАБОТЧИК ТЕКСТА
+@bot.message_handler(func=lambda message: True)
+def handle_text(message):
+    text = message.text
+
+    # Проверяем точные совпадения с кнопками (с эмодзи!)
+    if text == "👀 Информация":
+        show_info_menu(message)
+    elif text == "📅 Создать задачу":
+        create_task(message)
+    elif text == "📋 Показать задачи":
+        show_tasks(message)
+    elif text == "🗑️ Удалить задачу":
+        delete_task(message)
+    elif text == "❓ Помощь":
+        help_command(message)
+    # Подменю информации
+    elif text == "🔹 О боте":
+        info_about(message)
+    elif text == "🔹 Автор":
+        info_author(message)
+    elif text == "🔹 Версия":
+        info_version(message)
+    else:
+        bot.send_message(
+            chat_id=message.chat.id,
+            text="Неизвестная команда. Используйте кнопки ниже.",
+            reply_markup=get_main_menu()
+        )
+
 # --- Запуск бота ---
 if __name__ == '__main__':
-    # Загружаем задачи из файла при старте
-    load_tasks()
     print("Бот запущен...")
     bot.infinity_polling()
